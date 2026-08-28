@@ -704,6 +704,44 @@ class DatabaseSecurityTests(unittest.IsolatedAsyncioTestCase):
         await db.delete_account(account["id"])
         self.assertEqual(await db.get_email_count(account["id"]), 0)
 
+    async def test_mail_notifications_are_deduplicated_claimed_and_read(self):
+        await db.init_db()
+        await db.add_account("notify@example.com", "", "client", "token")
+        account = (await db.get_accounts())[0][0]
+
+        created = await db.create_mail_notification(
+            account["id"],
+            "INBOX",
+            "uid-notify-1",
+            "Sender <sender@example.com>",
+            "Important subject",
+            "Short preview",
+        )
+        duplicate = await db.create_mail_notification(
+            account["id"],
+            "INBOX",
+            "uid-notify-1",
+            "Sender <sender@example.com>",
+            "Important subject",
+            "Short preview",
+        )
+        self.assertTrue(created)
+        self.assertFalse(duplicate)
+        self.assertEqual(await db.get_unread_notification_count(), 1)
+
+        pending = await db.claim_pending_notifications()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["account_email"], "notify@example.com")
+        self.assertEqual(await db.claim_pending_notifications(), [])
+        self.assertEqual((await db.get_notifications())[0]["subject"], "Important subject")
+
+        self.assertTrue(await db.mark_notification_read(pending[0]["id"]))
+        self.assertEqual(await db.get_unread_notification_count(), 0)
+        self.assertFalse(await db.mark_notification_read(999999))
+
+        await db.delete_account(account["id"])
+        self.assertEqual(await db.get_notifications(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import build_update_manifest
 import launcher
+import proxy_config
 import update_manager
 
 TEST_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
@@ -221,6 +222,22 @@ class NetworkTests(unittest.TestCase):
             self.assertEqual(real_session.get_adapter("https://").max_retries.total, 2)
         finally:
             real_session.close()
+
+    def test_latest_release_system_mode_uses_environment_proxy_discovery(self):
+        payload = json.dumps(
+            {
+                "tag_name": "v1.1.0",
+                "zipball_url": "https://api.github.com/repos/czppw/outlook-mail-manager/zipball/v1.1.0",
+            }
+        ).encode()
+        session = FakeSession(
+            [FakeResponse(content=payload, url=update_manager.LATEST_RELEASE_API)]
+        )
+        with mock.patch.object(update_manager, "_make_session", return_value=session):
+            update_manager._fetch_latest_release(proxy_config.SYSTEM_PROXY)
+
+        self.assertTrue(session.trust_env)
+        self.assertIsNone(session.calls[0][1]["proxies"])
 
     def test_unapproved_redirect_is_not_followed(self):
         response = FakeResponse(

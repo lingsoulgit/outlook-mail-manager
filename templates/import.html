@@ -8,7 +8,50 @@
     </div>
 </div>
 
-<div class="card" style="max-width: 860px;">
+<div class="card oauth-card" id="microsoft-oauth" style="max-width: 860px;">
+    <div class="card-head">
+        <div>
+            <h2>使用 Microsoft 登录</h2>
+            <p class="page-sub">登录并授权后，系统会自动识别邮箱并加密保存 refresh token</p>
+        </div>
+    </div>
+
+    <div class="info-box">
+        <p>应用需要启用“允许公共客户端流”，并具有 Microsoft Graph 委托权限 <code>Mail.Read</code> 和 <code>User.Read</code>。</p>
+        <p>同一个 client_id 可以连续添加多个 Microsoft 账号，每个账号分别登录授权一次。</p>
+    </div>
+
+    <div class="form-group">
+        <label for="microsoft-client-id">Microsoft 应用程序（客户端）ID</label>
+        <input
+            type="text"
+            id="microsoft-client-id"
+            value="{{ microsoft_client_id }}"
+            placeholder="00000000-0000-0000-0000-000000000000"
+            autocomplete="off"
+            spellcheck="false"
+        >
+        <p class="hint">验证成功后会保存此 client_id，后续添加账号无需重复填写。</p>
+    </div>
+
+    <button type="button" class="btn btn-primary" id="microsoft-oauth-start">使用 Microsoft 登录</button>
+
+    <div class="oauth-device-panel" id="microsoft-oauth-panel" hidden>
+        <p>登录代码会自动复制；在 Microsoft 页面按 <kbd>Ctrl</kbd> + <kbd>V</kbd> 粘贴：</p>
+        <div
+            class="oauth-device-code"
+            id="microsoft-oauth-code"
+            role="button"
+            tabindex="0"
+            title="点击重新复制登录代码"
+            aria-label="登录代码，点击可复制"
+        ></div>
+        <a class="btn btn-success" id="microsoft-oauth-link" href="https://microsoft.com/devicelogin" target="_blank" rel="noopener noreferrer">打开 Microsoft 登录</a>
+        <p class="oauth-device-status" id="microsoft-oauth-status" role="status" aria-live="polite">等待授权...</p>
+    </div>
+</div>
+
+<div class="card" style="max-width: 860px; margin-top: 18px;">
     {% if error %}
     <div class="alert alert-error">{{ error }}</div>
     {% endif %}
@@ -30,17 +73,18 @@
     {% endif %}
 
     <div class="info-box">
+        <p><strong>手工批量导入</strong></p>
         <p>格式：每行一个账号，用 <code>----</code> 分隔</p>
         <p><code>邮箱----密码----client_id----refresh_token</code></p>
-        <p>Gmail 账号的「密码」字段填 <code>client_secret</code>。重复导入同一邮箱只会更新凭据，历史邮件和状态保留。</p>
+        <p>Microsoft 的密码字段留空；Gmail 的密码字段填 <code>client_secret</code>。重复导入同一邮箱只会更新凭据，历史邮件和状态保留。</p>
     </div>
 
     <form method="post" enctype="multipart/form-data">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="form-group">
             <label>粘贴账号（每行一个）</label>
-            <textarea name="text" rows="10" placeholder="email1@outlook.com----pass1----client_id1----refresh_token1
-email2@outlook.com----pass2----client_id2----refresh_token2"></textarea>
+            <textarea name="text" rows="10" placeholder="email1@outlook.com--------client_id1----refresh_token1
+email2@gmail.com----client_secret2----client_id2----refresh_token2"></textarea>
         </div>
 
         <div class="form-group">

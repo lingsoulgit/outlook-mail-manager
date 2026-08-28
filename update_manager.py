@@ -32,6 +32,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from proxy_config import is_system_proxy, system_proxies
+
 REPOSITORY = "czppw/outlook-mail-manager"
 PROJECT_ROOT = Path(__file__).resolve().parent
 VERSION_FILENAME = "VERSION"
@@ -310,7 +312,7 @@ def get_current_version() -> str:
 
 
 def _normalise_proxies(proxy: str | Mapping[str, str] | None) -> dict[str, str] | None:
-    if proxy is None:
+    if proxy is None or is_system_proxy(proxy):
         return None
     if isinstance(proxy, str):
         proxy = proxy.strip()
@@ -326,7 +328,7 @@ def _normalise_proxies(proxy: str | Mapping[str, str] | None) -> dict[str, str] 
 def _proxy_cache_key(proxy: str | Mapping[str, str] | None) -> str:
     proxies = _normalise_proxies(proxy)
     cache_identity = {
-        "mode": "environment" if proxy is None else "explicit",
+        "mode": "system" if proxy is None or is_system_proxy(proxy) else "explicit",
         "proxies": proxies or {},
     }
     serialised = json.dumps(cache_identity, sort_keys=True, separators=(",", ":"))
@@ -459,7 +461,7 @@ def _fetch_latest_release(
             if cached is not None and now - cached[0] < CACHE_TTL_SECONDS:
                 return cached[1]
     session = _make_session()
-    session.trust_env = proxy is None
+    session.trust_env = proxy is None or is_system_proxy(proxy)
     response: requests.Response | None = None
     try:
         response = _safe_get(session, LATEST_RELEASE_API, proxy)
@@ -506,7 +508,7 @@ def _download_zipball(
     proxy: str | Mapping[str, str] | None,
 ) -> None:
     session = _make_session()
-    session.trust_env = proxy is None
+    session.trust_env = proxy is None or is_system_proxy(proxy)
     response: requests.Response | None = None
     try:
         response = _safe_get(session, url, proxy)
@@ -983,7 +985,7 @@ def application_instance_lock() -> Iterator[None]:
 
 def _proxy_environment(proxy: str | Mapping[str, str] | None) -> dict[str, str]:
     environment = os.environ.copy()
-    proxies = _normalise_proxies(proxy)
+    proxies = system_proxies() if is_system_proxy(proxy) else _normalise_proxies(proxy)
     proxy_variables = (
         "HTTP_PROXY",
         "http_proxy",
@@ -994,7 +996,7 @@ def _proxy_environment(proxy: str | Mapping[str, str] | None) -> dict[str, str]:
         "PIP_PROXY",
     )
     if not proxies:
-        if proxy is not None:
+        if proxy is not None and not is_system_proxy(proxy):
             for name in proxy_variables:
                 environment.pop(name, None)
         return environment
@@ -1018,7 +1020,9 @@ def _venv_python(venv_root: Path) -> Path:
 
 
 def _uses_socks_proxy(proxy: str | Mapping[str, str] | None) -> bool:
-    proxies = _normalise_proxies(proxy) or {}
+    proxies = (
+        system_proxies() if is_system_proxy(proxy) else _normalise_proxies(proxy) or {}
+    )
     return any(
         urlparse(value).scheme.lower() in {"socks4", "socks5", "socks5h"}
         for value in proxies.values()

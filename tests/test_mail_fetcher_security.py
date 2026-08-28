@@ -13,6 +13,7 @@ from unittest import mock
 import requests
 
 import mail_fetcher
+import proxy_config
 
 
 @contextlib.contextmanager
@@ -115,6 +116,80 @@ class FakeFolderIMAP:
 
 
 class MailFetcherSecurityTests(unittest.TestCase):
+    def test_microsoft_device_flow_starts_polls_and_resolves_mailbox(self):
+        session = mock.Mock()
+        session.post.side_effect = [
+            FakeResponse(
+                payload={
+                    "device_code": "server-device-secret",
+                    "user_code": "ABCD-EFGH",
+                    "verification_uri": "https://login.microsoft.com/device",
+                    "expires_in": 900,
+                    "interval": 5,
+                }
+            ),
+            FakeResponse(
+                status_code=400, payload={"error": "authorization_pending"}
+            ),
+            FakeResponse(
+                payload={
+                    "access_token": "access-secret",
+                    "refresh_token": "refresh-secret",
+                }
+            ),
+        ]
+        session.get.return_value = FakeResponse(
+            payload={
+                "mail": None,
+                "userPrincipalName": "Person@Outlook.com",
+                "otherMails": [],
+            }
+        )
+
+        with mock.patch.object(mail_fetcher, "_http_session", return_value=session):
+            started = mail_fetcher.start_microsoft_device_authorization("client-id")
+            pending = mail_fetcher.poll_microsoft_device_authorization(
+                "client-id", started["device_code"]
+            )
+            authorized = mail_fetcher.poll_microsoft_device_authorization(
+                "client-id", started["device_code"]
+            )
+            email_addr = mail_fetcher.get_microsoft_account_email(
+                authorized["access_token"]
+            )
+
+        self.assertEqual(started["user_code"], "ABCD-EFGH")
+        self.assertEqual(pending, {"status": "authorization_pending"})
+        self.assertEqual(authorized["refresh_token"], "refresh-secret")
+        self.assertEqual(email_addr, "person@outlook.com")
+        self.assertEqual(
+            session.post.call_args_list[0].kwargs["data"]["scope"],
+            mail_fetcher.MICROSOFT_DEVICE_SCOPE,
+        )
+        self.assertEqual(
+            session.get.call_args.kwargs["headers"]["Authorization"],
+            "Bearer access-secret",
+        )
+
+    def test_microsoft_device_flow_rejects_untrusted_verification_uri(self):
+        response = FakeResponse(
+            payload={
+                "device_code": "server-device-secret",
+                "user_code": "ABCD-EFGH",
+                "verification_uri": "https://attacker.example/device",
+                "expires_in": 900,
+                "interval": 5,
+            }
+        )
+        session = mock.Mock()
+        session.post.return_value = response
+        with (
+            mock.patch.object(mail_fetcher, "_http_session", return_value=session),
+            self.assertRaises(mail_fetcher.MicrosoftOAuthError) as raised,
+        ):
+            mail_fetcher.start_microsoft_device_authorization("client-id")
+        self.assertEqual(raised.exception.code, "invalid_response")
+
     def test_imap_tls_context_verifies_direct_and_proxy_connections(self):
         class Context:
             check_hostname = False
@@ -162,6 +237,33 @@ class MailFetcherSecurityTests(unittest.TestCase):
             993,
             "socks5h://proxy.example.test:1080",
             ssl_context=proxy_context,
+            timeout=mail_fetcher.IMAP_TIMEOUT,
+        )
+
+        system_context = Context()
+        with (
+            mock.patch.object(
+                mail_fetcher.ssl,
+                "create_default_context",
+                return_value=system_context,
+            ),
+            mock.patch.object(
+                mail_fetcher,
+                "system_proxy_url",
+                return_value="http://system-proxy.example.test:8080",
+            ) as resolve_system,
+            mock.patch.object(mail_fetcher, "_ProxyIMAP4SSL") as system_proxied,
+        ):
+            mail_fetcher._open_imap(
+                "imap.example.test", 993, proxy=proxy_config.SYSTEM_PROXY
+            )
+
+        resolve_system.assert_called_once_with("imap.example.test")
+        system_proxied.assert_called_once_with(
+            "imap.example.test",
+            993,
+            "http://system-proxy.example.test:8080",
+            ssl_context=system_context,
             timeout=mail_fetcher.IMAP_TIMEOUT,
         )
 
@@ -567,6 +669,10 @@ class MailFetcherSecurityTests(unittest.TestCase):
             direct_proxies = post.call_args.kwargs["proxies"]
             mail_fetcher.get_access_token("client-id", "existing-refresh", proxy=None)
             environment_proxies = post.call_args.kwargs["proxies"]
+            mail_fetcher.get_access_token(
+                "client-id", "existing-refresh", proxy=proxy_config.SYSTEM_PROXY
+            )
+            system_proxies = post.call_args.kwargs["proxies"]
 
         self.assertEqual(tokens, ("access-secret", "existing-refresh"))
         self.assertEqual(
@@ -579,6 +685,7 @@ class MailFetcherSecurityTests(unittest.TestCase):
                 "https": "http://environment-proxy.test:8080",
             },
         )
+        self.assertIsNone(system_proxies)
 
     def test_partial_imap_fetch_preserves_valid_messages_and_reports_oversized(self):
         message = EmailMessage()

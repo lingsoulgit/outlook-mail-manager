@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import html
 import hmac
 import logging
 import math
 import os
+import re
+import secrets
 import time
+import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from typing import Annotated
@@ -23,6 +28,7 @@ import db
 import mail_fetcher
 import update_manager
 from email_sanitizer import sanitize_email_html
+from proxy_config import SYSTEM_PROXY
 from web_security import RequestBodyLimitMiddleware, SecurityHeadersMiddleware
 
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +41,21 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     except ValueError:
         value = default
     return max(minimum, min(maximum, value))
+
+
+def _env_auto_check_minutes() -> float:
+    raw_minutes = os.environ.get("OMM_AUTO_CHECK_MINUTES", "").strip()
+    raw_hours = os.environ.get("OMM_AUTO_CHECK_HOURS", "").strip()
+    try:
+        if raw_minutes:
+            value = float(raw_minutes)
+        elif raw_hours:
+            value = float(raw_hours) * 60
+        else:
+            value = 10.0
+    except ValueError:
+        value = 10.0
+    return max(0.0, value) if math.isfinite(value) else 10.0
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -54,7 +75,7 @@ CHECK_ORIGIN = os.environ.get("OMM_CHECK_ORIGIN", "1").strip().lower() not in {
     "false",
     "no",
 }
-AUTO_CHECK_DEFAULT_HOURS = float(os.environ.get("OMM_AUTO_CHECK_HOURS", "0"))
+AUTO_CHECK_DEFAULT_MINUTES = _env_auto_check_minutes()
 
 LOGIN_MAX_FAILS = 5
 LOGIN_FAIL_WINDOW_SECONDS = 300
@@ -63,6 +84,8 @@ _LOGIN_FAILS_MAX_ENTRIES = 10_000
 _login_fails: dict[str, list[float]] = {}
 _account_locks: dict[int, asyncio.Lock] = {}
 _batch_lock = asyncio.Lock()
+_microsoft_oauth_flows: dict[str, dict] = {}
+MICROSOFT_OAUTH_MAX_FLOWS = 100
 
 
 class AccountBusyError(RuntimeError):
@@ -100,8 +123,19 @@ def classify_error(error: str | None) -> str:
     return "取件失败"
 
 
-async def _auto_check_hours() -> float:
-    value = await db.get_setting("auto_check_hours")
+def _mail_notification_preview(message: dict, limit: int = 100) -> str:
+    text = str(message.get("body") or "")
+    if not text:
+        markup = str(message.get("body_html") or "")
+        markup = re.sub(
+            r"(?is)<(?:script|style)\b[^>]*>.*?</(?:script|style)>", " ", markup
+        )
+        text = re.sub(r"(?s)<[^>]+>", " ", markup)
+    return " ".join(html.unescape(text).split())[:limit]
+
+
+async def _auto_check_minutes() -> float:
+    value = await db.get_setting("auto_check_minutes")
     if value is not None:
         try:
             parsed = float(value)
@@ -109,11 +143,19 @@ async def _auto_check_hours() -> float:
                 return max(0.0, parsed)
         except ValueError:
             pass
-    return max(0.0, AUTO_CHECK_DEFAULT_HOURS)
+    legacy_hours = await db.get_setting("auto_check_hours")
+    if legacy_hours is not None:
+        try:
+            parsed = float(legacy_hours) * 60
+            if math.isfinite(parsed):
+                return max(0.0, parsed)
+        except ValueError:
+            pass
+    return AUTO_CHECK_DEFAULT_MINUTES
 
 
 AUTO_CHECK_POLL_SECONDS = 60.0
-AUTO_CHECK_STARTUP_DELAY = 600.0
+AUTO_CHECK_STARTUP_DELAY = 60.0
 
 
 async def _auto_check_loop() -> None:
@@ -121,13 +163,13 @@ async def _auto_check_loop() -> None:
     last_run: float | None = None
     while True:
         try:
-            hours = await _auto_check_hours()
-            interval = hours * 3600
+            minutes = await _auto_check_minutes()
+            interval = minutes * 60
             now = time.monotonic()
             if interval > 0 and (last_run is None or now - last_run >= interval):
                 last_run = now
                 logger.info("Automatic account health check started")
-                result = await _fetch_all_accounts(limit=1)
+                result = await _fetch_all_accounts(limit=1, notify_new=True)
                 logger.info("Automatic account health check finished: %s", result)
             await asyncio.sleep(AUTO_CHECK_POLL_SECONDS)
         except asyncio.CancelledError:
@@ -425,11 +467,36 @@ async def change_password(
     return response
 
 
-async def _global_proxy() -> str:
+async def _proxy_settings_context() -> dict[str, object]:
     configured = await db.get_setting("global_proxy")
-    if configured is not None:
-        return configured.strip()
-    return os.environ.get("OMM_PROXY", "").strip()
+    mode = await db.get_setting("global_proxy_mode")
+    from_env = False
+    if mode not in {"direct", "system", "manual"}:
+        if configured is not None:
+            mode = "manual" if configured.strip() else "direct"
+        else:
+            configured = os.environ.get("OMM_PROXY", "").strip()
+            mode = "manual" if configured else "direct"
+            from_env = bool(configured)
+    elif configured is None:
+        configured = (
+            os.environ.get("OMM_PROXY", "").strip() if mode == "manual" else ""
+        )
+        from_env = mode == "manual" and bool(configured)
+    return {
+        "global_proxy_mode": mode,
+        "global_proxy": configured.strip(),
+        "proxy_from_env": from_env,
+    }
+
+
+async def _global_proxy() -> str:
+    settings = await _proxy_settings_context()
+    if settings["global_proxy_mode"] == "system":
+        return SYSTEM_PROXY
+    if settings["global_proxy_mode"] == "manual":
+        return str(settings["global_proxy"])
+    return ""
 
 
 def _validate_proxy(proxy: str) -> str:
@@ -458,6 +525,67 @@ async def _default_ms_fetch_mode() -> str:
         if os.environ.get("OMM_MS_FETCH_MODE", "graph").lower() == "imap"
         else "graph"
     )
+
+
+async def _microsoft_client_id() -> str:
+    configured = await db.get_setting("microsoft_client_id")
+    if configured is not None:
+        return configured.strip()
+    return os.environ.get("OMM_MS_CLIENT_ID", "").strip()
+
+
+def _normalize_microsoft_client_id(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("client_id 格式无效")
+    try:
+        return str(uuid.UUID(value.strip()))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("client_id 必须是 Microsoft 应用程序(客户端) ID") from exc
+
+
+def _oauth_session_fingerprint(request: Request) -> bytes | None:
+    token = _session_token(request)
+    return hashlib.sha256(token.encode("utf-8")).digest() if token else None
+
+
+def _discard_microsoft_oauth_flow(flow_id: str) -> None:
+    flow = _microsoft_oauth_flows.pop(flow_id, None)
+    if flow is not None:
+        flow.clear()
+
+
+def _prune_microsoft_oauth_flows(now: float) -> None:
+    for flow_id, flow in list(_microsoft_oauth_flows.items()):
+        if flow.get("expires_at", 0) <= now:
+            _discard_microsoft_oauth_flow(flow_id)
+    while len(_microsoft_oauth_flows) >= MICROSOFT_OAUTH_MAX_FLOWS:
+        oldest = min(
+            _microsoft_oauth_flows,
+            key=lambda key: _microsoft_oauth_flows[key].get("started_at", 0),
+        )
+        _discard_microsoft_oauth_flow(oldest)
+
+
+def _microsoft_oauth_error_message(code: str) -> str:
+    return {
+        "invalid_client": "client_id 无效，或应用尚未启用公共客户端流",
+        "invalid_scope": "应用需要 Microsoft Graph 委托权限 Mail.Read 和 User.Read",
+        "authorization_declined": "你取消了 Microsoft 授权",
+        "bad_verification_code": "Microsoft 登录代码无效，请重新开始",
+        "expired_token": "Microsoft 登录代码已过期，请重新开始",
+        "invalid_grant": "Microsoft 授权已失效，请重新开始",
+        "profile_forbidden": "无法读取邮箱身份，请添加 User.Read 委托权限后重试",
+        "email_missing": "Microsoft 账号没有返回可用的邮箱地址",
+        "network_error": "连接 Microsoft 登录服务失败，请检查网络或代理",
+        "service_error": "Microsoft 登录服务暂时不可用",
+        "invalid_response": "Microsoft 登录服务返回了无效响应",
+    }.get(code, "Microsoft 登录失败")
+
+
+async def _import_page_context(values: dict | None = None) -> dict:
+    context = {"microsoft_client_id": await _microsoft_client_id()}
+    context.update(values or {})
+    return context
 
 
 def _with_token_days(accounts: list[dict]) -> list[dict]:
@@ -535,7 +663,161 @@ async def index(
 
 @app.get("/import", response_class=HTMLResponse)
 async def import_page(request: Request):
-    return _render(request, "import.html")
+    return _render(request, "import.html", await _import_page_context())
+
+
+@app.post("/api/oauth/microsoft/device/start")
+async def start_microsoft_oauth(request: Request):
+    _require_csrf(request)
+    try:
+        payload = await request.json()
+        client_id = _normalize_microsoft_client_id(payload.get("client_id"))
+    except (ValueError, TypeError, AttributeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    proxy = await _global_proxy()
+    try:
+        authorization = await asyncio.to_thread(
+            mail_fetcher.start_microsoft_device_authorization,
+            client_id,
+            proxy=proxy,
+        )
+    except mail_fetcher.MicrosoftOAuthError as exc:
+        return JSONResponse(
+            {"error": _microsoft_oauth_error_message(exc.code)}, status_code=502
+        )
+
+    fingerprint = _oauth_session_fingerprint(request)
+    if fingerprint is None:
+        return JSONResponse({"error": "登录会话已失效"}, status_code=401)
+    await db.set_settings({"microsoft_client_id": client_id})
+    now = time.monotonic()
+    _prune_microsoft_oauth_flows(now)
+    for existing_id, flow in list(_microsoft_oauth_flows.items()):
+        if hmac.compare_digest(flow["session_fingerprint"], fingerprint):
+            _discard_microsoft_oauth_flow(existing_id)
+
+    flow_id = secrets.token_urlsafe(32)
+    interval = authorization["interval"]
+    _microsoft_oauth_flows[flow_id] = {
+        "client_id": client_id,
+        "device_code": authorization["device_code"],
+        "session_fingerprint": fingerprint,
+        "started_at": now,
+        "expires_at": now + authorization["expires_in"],
+        "interval": interval,
+        "next_poll_at": now + interval,
+        "proxy": proxy,
+    }
+    return {
+        "flow_id": flow_id,
+        "user_code": authorization["user_code"],
+        "verification_uri": authorization["verification_uri_complete"]
+        or authorization["verification_uri"],
+        "expires_in": authorization["expires_in"],
+        "retry_after": interval,
+    }
+
+
+@app.post("/api/oauth/microsoft/device/poll")
+async def poll_microsoft_oauth(request: Request):
+    _require_csrf(request)
+    try:
+        payload = await request.json()
+        flow_id = payload.get("flow_id", "").strip()
+    except (ValueError, TypeError, AttributeError):
+        flow_id = ""
+    if not flow_id or len(flow_id) > 128:
+        return JSONResponse({"error": "Microsoft 登录流程无效"}, status_code=400)
+
+    now = time.monotonic()
+    _prune_microsoft_oauth_flows(now)
+    flow = _microsoft_oauth_flows.get(flow_id)
+    fingerprint = _oauth_session_fingerprint(request)
+    if (
+        flow is None
+        or fingerprint is None
+        or not hmac.compare_digest(flow["session_fingerprint"], fingerprint)
+    ):
+        return JSONResponse(
+            {"error": "Microsoft 登录流程已过期，请重新开始"}, status_code=404
+        )
+
+    if now < flow["next_poll_at"]:
+        return {
+            "status": "pending",
+            "retry_after": max(1, math.ceil(flow["next_poll_at"] - now)),
+        }
+    flow["next_poll_at"] = now + flow["interval"]
+
+    if "refresh_token" not in flow:
+        try:
+            result = await asyncio.to_thread(
+                mail_fetcher.poll_microsoft_device_authorization,
+                flow["client_id"],
+                flow["device_code"],
+                proxy=flow["proxy"],
+            )
+        except mail_fetcher.MicrosoftOAuthError as exc:
+            if exc.code == "network_error":
+                return {
+                    "status": "pending",
+                    "message": _microsoft_oauth_error_message(exc.code),
+                    "retry_after": flow["interval"],
+                }
+            _discard_microsoft_oauth_flow(flow_id)
+            return JSONResponse(
+                {"error": _microsoft_oauth_error_message(exc.code)}, status_code=502
+            )
+
+        if result["status"] in {"authorization_pending", "slow_down"}:
+            if result["status"] == "slow_down":
+                flow["interval"] = min(60, flow["interval"] + 5)
+            return {"status": "pending", "retry_after": flow["interval"]}
+        if result["status"] == "failed":
+            _discard_microsoft_oauth_flow(flow_id)
+            return JSONResponse(
+                {"error": _microsoft_oauth_error_message(result["error"])},
+                status_code=400,
+            )
+        flow["access_token"] = result["access_token"]
+        flow["refresh_token"] = result["refresh_token"]
+        flow["expires_at"] = time.monotonic() + 300
+
+    try:
+        email_addr = await asyncio.to_thread(
+            mail_fetcher.get_microsoft_account_email,
+            flow["access_token"],
+            proxy=flow["proxy"],
+        )
+    except mail_fetcher.MicrosoftOAuthError as exc:
+        if exc.code == "network_error":
+            return {
+                "status": "pending",
+                "message": _microsoft_oauth_error_message(exc.code),
+                "retry_after": flow["interval"],
+            }
+        _discard_microsoft_oauth_flow(flow_id)
+        return JSONResponse(
+            {"error": _microsoft_oauth_error_message(exc.code)}, status_code=400
+        )
+
+    try:
+        outcome = await db.add_account(
+            email_addr,
+            "",
+            flow["client_id"],
+            flow["refresh_token"],
+            provider="microsoft",
+            fetch_mode=await _default_ms_fetch_mode(),
+        )
+    except Exception as exc:  # noqa: BLE001 - never expose token persistence details
+        logger.warning("Microsoft OAuth account save failed: %s", type(exc).__name__)
+        _discard_microsoft_oauth_flow(flow_id)
+        return JSONResponse({"error": "保存 Microsoft 账号失败"}, status_code=500)
+
+    _discard_microsoft_oauth_flow(flow_id)
+    return {"status": "complete", "email": email_addr, "outcome": outcome}
 
 
 @app.post("/import")
@@ -550,16 +832,33 @@ async def do_import(
     if file and file.filename:
         content = await file.read(MAX_REQUEST_BYTES + 1)
         if len(content) > MAX_REQUEST_BYTES:
-            return _render(request, "import.html", {"error": "文件过大"}, 413)
+            return _render(
+                request,
+                "import.html",
+                await _import_page_context({"error": "文件过大"}),
+                413,
+            )
         lines.extend(content.decode("utf-8", errors="replace").splitlines())
     if not lines:
-        return _render(request, "import.html", {"error": "请提供账号数据"}, 400)
+        return _render(
+            request,
+            "import.html",
+            await _import_page_context({"error": "请提供账号数据"}),
+            400,
+        )
     if len(lines) > MAX_IMPORT_LINES:
-        return _render(request, "import.html", {"error": "导入行数过多"}, 413)
+        return _render(
+            request,
+            "import.html",
+            await _import_page_context({"error": "导入行数过多"}),
+            413,
+        )
     result = await db.import_accounts(
         lines, ms_fetch_mode=await _default_ms_fetch_mode()
     )
-    return _render(request, "import.html", {"result": result})
+    return _render(
+        request, "import.html", await _import_page_context({"result": result})
+    )
 
 
 @app.get("/tokens", response_class=HTMLResponse)
@@ -674,7 +973,9 @@ async def _refresh_account(account: dict) -> tuple[str, bool, str]:
     return access_token, new_refresh_token != account["refresh_token"], proxy
 
 
-async def _fetch_and_save_operation(account_id: int, limit: int) -> tuple[int, bool]:
+async def _fetch_and_save_operation(
+    account_id: int, limit: int, notify_new: bool = False
+) -> tuple[int, bool]:
     async with _account_operation(account_id):
         current = await db.get_account(account_id)
         if not current or not current.get("enabled"):
@@ -697,7 +998,28 @@ async def _fetch_and_save_operation(account_id: int, limit: int) -> tuple[int, b
 
             saved = 0
             for folder, emails in result.items():
-                saved += await db.save_emails(current["id"], folder, emails)
+                if not notify_new:
+                    saved += await db.save_emails(current["id"], folder, emails)
+                    continue
+                for message in emails:
+                    inserted = await db.save_emails(current["id"], folder, [message])
+                    saved += inserted
+                    if not inserted or folder != "INBOX":
+                        continue
+                    try:
+                        await db.create_mail_notification(
+                            current["id"],
+                            folder,
+                            str(message.get("uid") or ""),
+                            str(message.get("from") or ""),
+                            str(message.get("subject") or ""),
+                            _mail_notification_preview(message),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - mail fetch remains valid
+                        logger.warning(
+                            "New-mail notification queue failed: %s",
+                            type(exc).__name__,
+                        )
             total = await db.get_email_count(current["id"])
             if partial_error:
                 await db.update_account_status(
@@ -713,8 +1035,12 @@ async def _fetch_and_save_operation(account_id: int, limit: int) -> tuple[int, b
             raise
 
 
-async def _fetch_and_save(account: dict, limit: int) -> tuple[int, bool]:
-    return await _run_critical(_fetch_and_save_operation(account["id"], limit))
+async def _fetch_and_save(
+    account: dict, limit: int, notify_new: bool = False
+) -> tuple[int, bool]:
+    return await _run_critical(
+        _fetch_and_save_operation(account["id"], limit, notify_new=notify_new)
+    )
 
 
 @app.post("/fetch/{account_id}")
@@ -736,7 +1062,7 @@ async def fetch_single(request: Request, account_id: int):
         return JSONResponse({"ok": False, "error": message}, status_code=502)
 
 
-async def _fetch_all_accounts(limit: int) -> dict:
+async def _fetch_all_accounts(limit: int, notify_new: bool = False) -> dict:
     async with _batch_lock:
         accounts = await db.get_all_active_accounts()
         semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
@@ -745,7 +1071,9 @@ async def _fetch_all_accounts(limit: int) -> dict:
         async def fetch_one(account: dict):
             async with semaphore:
                 try:
-                    saved, _ = await _fetch_and_save(account, limit)
+                    saved, _ = await _fetch_and_save(
+                        account, limit, notify_new=notify_new
+                    )
                     result["success"] += 1
                     result["total_emails"] += saved
                 except AccountPartialFetchError as exc:
@@ -767,7 +1095,36 @@ async def fetch_all(request: Request):
 @app.post("/check-all")
 async def check_all(request: Request):
     _require_csrf(request)
-    return await _fetch_all_accounts(1)
+    return await _fetch_all_accounts(1, notify_new=True)
+
+
+@app.post("/api/notifications/poll")
+async def poll_notifications(request: Request):
+    _require_csrf(request)
+    pending = await db.claim_pending_notifications(20)
+    recent, unread_count = await asyncio.gather(
+        db.get_notifications(20), db.get_unread_notification_count()
+    )
+    return {
+        "pending": pending,
+        "notifications": recent,
+        "unread_count": unread_count,
+    }
+
+
+@app.post("/api/notifications/{notification_id}/read")
+async def read_notification(request: Request, notification_id: int):
+    _require_csrf(request)
+    if notification_id <= 0 or not await db.mark_notification_read(notification_id):
+        return JSONResponse({"error": "Notification not found"}, status_code=404)
+    return {"ok": True}
+
+
+@app.post("/api/notifications/read-all")
+async def read_all_notifications(request: Request):
+    _require_csrf(request)
+    updated = await db.mark_all_notifications_read()
+    return {"ok": True, "updated": updated}
 
 
 @app.post("/account/{account_id}/toggle")
@@ -898,18 +1255,14 @@ async def update_prefs(
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
-    configured_proxy = await db.get_setting("global_proxy")
+    proxy_context = await _proxy_settings_context()
     return _render(
         request,
         "settings.html",
         {
-            "global_proxy": configured_proxy
-            if configured_proxy is not None
-            else os.environ.get("OMM_PROXY", ""),
-            "proxy_from_env": configured_proxy is None
-            and bool(os.environ.get("OMM_PROXY")),
+            **proxy_context,
             "default_ms_fetch_mode": await _default_ms_fetch_mode(),
-            "auto_check_hours": await _auto_check_hours(),
+            "auto_check_minutes": await _auto_check_minutes(),
         },
     )
 
@@ -918,15 +1271,29 @@ async def settings_page(request: Request):
 async def save_settings(
     request: Request,
     global_proxy: str = Form(""),
+    global_proxy_mode: str = Form(""),
     default_ms_fetch_mode: str = Form("graph"),
-    auto_check_hours: str = Form("0"),
+    auto_check_minutes: str = Form(""),
+    auto_check_hours: str = Form(""),
     csrf_token: str = Form(...),
 ):
     _require_csrf(request, csrf_token)
     try:
-        proxy = _validate_proxy(global_proxy)
-        hours = float(auto_check_hours)
-        if not math.isfinite(hours) or not 0 <= hours <= 24 * 30:
+        proxy_mode = global_proxy_mode.strip().lower()
+        if not proxy_mode:
+            proxy_mode = "manual" if global_proxy.strip() else "direct"
+        if proxy_mode not in {"direct", "system", "manual"}:
+            raise ValueError("代理模式无效")
+        proxy = _validate_proxy(global_proxy) if global_proxy.strip() else ""
+        if proxy_mode == "manual" and not proxy:
+            raise ValueError("手动设置模式必须填写代理地址")
+        if auto_check_minutes.strip():
+            minutes = float(auto_check_minutes)
+        elif auto_check_hours.strip():
+            minutes = float(auto_check_hours) * 60
+        else:
+            minutes = 10.0
+        if not math.isfinite(minutes) or not 0 <= minutes <= 24 * 60 * 30:
             raise ValueError("自动检测间隔超出范围")
     except ValueError as exc:
         return _render(
@@ -934,9 +1301,10 @@ async def save_settings(
             "settings.html",
             {
                 "global_proxy": global_proxy,
+                "global_proxy_mode": proxy_mode,
                 "proxy_from_env": False,
                 "default_ms_fetch_mode": default_ms_fetch_mode,
-                "auto_check_hours": auto_check_hours,
+                "auto_check_minutes": auto_check_minutes or auto_check_hours or "10",
                 "error": str(exc),
             },
             400,
@@ -946,8 +1314,9 @@ async def save_settings(
     await db.set_settings(
         {
             "global_proxy": proxy,
+            "global_proxy_mode": proxy_mode,
             "default_ms_fetch_mode": default_ms_fetch_mode,
-            "auto_check_hours": str(hours),
+            "auto_check_minutes": str(minutes),
         }
     )
     return _render(
@@ -955,12 +1324,27 @@ async def save_settings(
         "settings.html",
         {
             "global_proxy": proxy,
+            "global_proxy_mode": proxy_mode,
             "proxy_from_env": False,
             "default_ms_fetch_mode": default_ms_fetch_mode,
-            "auto_check_hours": hours,
+            "auto_check_minutes": minutes,
             "success": "设置已保存",
         },
     )
+
+
+@app.post("/api/settings/default-ms-fetch-mode")
+async def save_default_ms_fetch_mode(request: Request):
+    _require_csrf(request)
+    try:
+        payload = await request.json()
+        fetch_mode = payload.get("fetch_mode", "").strip()
+    except (ValueError, TypeError, AttributeError):
+        fetch_mode = ""
+    if fetch_mode not in {"graph", "imap"}:
+        return JSONResponse({"error": "取件方式无效"}, status_code=400)
+    await db.set_settings({"default_ms_fetch_mode": fetch_mode})
+    return {"ok": True, "fetch_mode": fetch_mode}
 
 
 @app.post("/accounts/bulk-fetch-mode")
@@ -973,14 +1357,14 @@ async def bulk_fetch_mode(
     if fetch_mode not in {"graph", "imap"}:
         raise HTTPException(status_code=400, detail="Invalid fetch mode")
     count = await db.set_all_ms_fetch_mode(fetch_mode)
+    proxy_context = await _proxy_settings_context()
     return _render(
         request,
         "settings.html",
         {
-            "global_proxy": await _global_proxy(),
-            "proxy_from_env": False,
+            **proxy_context,
             "default_ms_fetch_mode": await _default_ms_fetch_mode(),
-            "auto_check_hours": await _auto_check_hours(),
+            "auto_check_minutes": await _auto_check_minutes(),
             "success": f"已更新 {count} 个 Microsoft 账号",
         },
     )

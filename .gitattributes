@@ -1,0 +1,18 @@
+* text=auto eol=crlf
+
+# Linux deployment files must keep Unix line endings.
+*.service text eol=lf
+*.sh text eol=lf
+
+# Binary and secret-bearing runtime files are never normalized.
+*.db binary
+*.db-* binary
+*.key binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.gz binary
+

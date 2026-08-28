@@ -35,10 +35,11 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                 <span class="nav-label">令牌状态</span>
             </a>
-            <a href="/settings" class="{{ 'active' if path == '/settings' }}">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-                <span class="nav-label">全局设置</span>
-            </a>
+            <button type="button" id="notification-toggle" aria-controls="notification-panel" aria-expanded="false">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                <span class="nav-label">新邮件提醒</span>
+                <span class="notification-count" id="notification-count" hidden>0</span>
+            </button>
         </nav>
 
         <div class="sidebar-foot">
@@ -47,6 +48,10 @@
                 <span class="version-status">检查中...</span>
                 <button type="button" class="version-update" hidden>⬆ 安装新版本</button>
             </div>
+            <a href="/settings" class="side-settings {{ 'active' if path == '/settings' }}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                <span class="nav-label">全局设置</span>
+            </a>
             <form method="post" action="/logout">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <button type="submit" class="side-logout">
@@ -61,5 +66,23 @@
         {% block content %}{% endblock %}
     </main>
 </div>
+<div class="notification-overlay" id="notification-overlay" hidden></div>
+<aside class="notification-panel" id="notification-panel" hidden aria-label="新邮件提醒">
+    <div class="notification-panel-head">
+        <div>
+            <h2>新邮件提醒</h2>
+            <p>自动检测只预览最新邮件</p>
+        </div>
+        <button type="button" class="notification-close" id="notification-close" aria-label="关闭通知中心">×</button>
+    </div>
+    <button type="button" class="btn btn-sm notification-permission" id="notification-permission" hidden>启用浏览器桌面通知</button>
+    <div class="notification-list" id="notification-list">
+        <div class="notification-empty">暂时没有新邮件提醒</div>
+    </div>
+    <div class="notification-panel-foot">
+        <button type="button" class="btn btn-sm" id="notification-read-all">全部标为已读</button>
+        <a href="/settings" class="btn btn-sm">提醒设置</a>
+    </div>
+</aside>
 </body>
 </html>

@@ -4,7 +4,7 @@
 <div class="page-head">
     <div>
         <h1>全局设置</h1>
-        <p class="page-sub">代理、默认取件方式与自动健康检测</p>
+        <p class="page-sub">代理、默认取件方式与新邮件预警</p>
     </div>
 </div>
 
@@ -15,62 +15,104 @@
 <div class="alert alert-error">{{ error }}</div>
 {% endif %}
 
-<div class="card" style="max-width: 720px;">
-    <form method="post" action="/settings">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<form method="post" action="/settings">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% set active_proxy_mode = global_proxy_mode | default('direct', true) %}
+
+    <div class="card" style="max-width: 720px;">
 
         <div class="card-section">
             <h3>🌐 中转代理</h3>
+            <div class="proxy-mode-grid">
+                <label class="radio-card">
+                    <input type="radio" name="global_proxy_mode" value="direct"
+                           {{ 'checked' if active_proxy_mode == 'direct' else '' }}>
+                    <span>
+                        <span class="radio-title">不使用代理</span>
+                        <span class="radio-desc">所有请求直接连接目标服务</span>
+                    </span>
+                </label>
+                <label class="radio-card">
+                    <input type="radio" name="global_proxy_mode" value="system"
+                           {{ 'checked' if active_proxy_mode == 'system' else '' }}>
+                    <span>
+                        <span class="radio-title">系统代理</span>
+                        <span class="radio-desc">跟随操作系统和标准代理环境变量</span>
+                    </span>
+                </label>
+                <label class="radio-card">
+                    <input type="radio" name="global_proxy_mode" value="manual"
+                           {{ 'checked' if active_proxy_mode == 'manual' else '' }}>
+                    <span>
+                        <span class="radio-title">手动设置</span>
+                        <span class="radio-desc">使用下面指定的代理地址</span>
+                    </span>
+                </label>
+            </div>
             <div class="form-group">
-                <label>代理地址（全部账号的 token 刷新与取件都走这里；留空为直连）</label>
-                <input type="text" name="global_proxy" value="{{ global_proxy }}"
+                <div id="manual-proxy-fields" {{ 'hidden' if active_proxy_mode != 'manual' else '' }}>
+                <label for="global-proxy">代理地址</label>
+                <input type="text" id="global-proxy" name="global_proxy" value="{{ global_proxy }}"
                        placeholder="socks5://user:pass@host:port 或 http://host:port">
                 <p class="hint">
                     支持 socks5 / socks5h / socks4 / http 代理，保存后立即生效，无需重启。
                     {% if proxy_from_env %}<br>当前值来自环境变量 <code>OMM_PROXY</code>，在此保存后将以页面配置为准。{% endif %}
                 </p>
+                </div>
+                <p class="hint">代理模式同时应用于 OAuth、Graph、IMAP、更新检查与依赖下载。</p>
             </div>
         </div>
 
         <div class="card-section">
-            <h3>📡 新账号默认取件方式（仅 Microsoft）</h3>
+            <h3>🔔 自动检测与新邮件预警</h3>
             <div class="form-group">
-                <label class="radio-card">
-                    <input type="radio" name="default_ms_fetch_mode" value="graph"
-                           {{ 'checked' if default_ms_fetch_mode == 'graph' else '' }}>
-                    <span>
-                        <span class="radio-title">Graph API</span>
-                        <span class="radio-desc">推荐，应对 MS IMAP 风控</span>
-                    </span>
-                </label>
-                <label class="radio-card">
-                    <input type="radio" name="default_ms_fetch_mode" value="imap"
-                           {{ 'checked' if default_ms_fetch_mode == 'imap' else '' }}>
-                    <span>
-                        <span class="radio-title">IMAP</span>
-                        <span class="radio-desc">传统 XOAUTH2 方式</span>
-                    </span>
-                </label>
-                <p class="hint">只影响之后新导入的账号。</p>
-            </div>
-        </div>
-
-        <div class="card-section">
-            <h3>🩺 自动健康检测</h3>
-            <div class="form-group">
-                <label>每隔多少小时自动检测一次全部账号（0 = 关闭）</label>
-                <input type="text" name="auto_check_hours" value="{{ auto_check_hours }}" style="width: 140px;">
+                <label for="auto-check-minutes">自动检测间隔</label>
+                {% set current_interval = auto_check_minutes | default(10, true) | float %}
+                {% set interval_options = [0, 5, 10, 15, 30, 60] %}
+                <select id="auto-check-minutes" name="auto_check_minutes" style="width: 190px;">
+                    {% if current_interval not in interval_options %}
+                    <option value="{{ current_interval }}" selected>{{ current_interval | int }} 分钟（当前）</option>
+                    {% endif %}
+                    <option value="0" {{ 'selected' if current_interval == 0 else '' }}>关闭自动检测</option>
+                    <option value="5" {{ 'selected' if current_interval == 5 else '' }}>每 5 分钟</option>
+                    <option value="10" {{ 'selected' if current_interval == 10 else '' }}>每 10 分钟（推荐）</option>
+                    <option value="15" {{ 'selected' if current_interval == 15 else '' }}>每 15 分钟</option>
+                    <option value="30" {{ 'selected' if current_interval == 30 else '' }}>每 30 分钟</option>
+                    <option value="60" {{ 'selected' if current_interval == 60 else '' }}>每 60 分钟</option>
+                </select>
                 <p class="hint">
-                    检测 = 小批量取件验证（每账号仅 1 封，几乎无流量）。失败的账号自动标记为「异常」，
-                    在账号列表按状态筛选「异常」即可看到。令牌失效 / 邮箱被封 / 网络故障都能及时发现。
-                    平时可以填 0 关闭，需要时在首页点「🩺 一键检测」手动验证账号池。
+                    每个账号仅检测收件箱与垃圾箱各自最新的 1 封邮件。新写入的收件箱邮件会进入通知中心，
+                    显示发件人、主题和约 100 字正文摘要；更多邮件仍由你点击「立即完整取件」后同步。
+                    检测失败的账号会自动标记为「异常」，垃圾箱邮件不会弹出提醒。
                 </p>
             </div>
         </div>
-
         <button type="submit" class="btn btn-primary">保存设置</button>
-    </form>
-</div>
+    </div>
+
+    <div class="card" style="max-width: 720px;">
+        <h3>📡 新账号默认取件方式（仅 Microsoft）</h3>
+        <div class="form-group">
+            <label class="radio-card">
+                <input type="radio" name="default_ms_fetch_mode" value="graph"
+                       {{ 'checked' if default_ms_fetch_mode == 'graph' else '' }}>
+                <span>
+                    <span class="radio-title">Graph API</span>
+                    <span class="radio-desc">推荐，应对 MS IMAP 风控</span>
+                </span>
+            </label>
+            <label class="radio-card">
+                <input type="radio" name="default_ms_fetch_mode" value="imap"
+                       {{ 'checked' if default_ms_fetch_mode == 'imap' else '' }}>
+                <span>
+                    <span class="radio-title">IMAP</span>
+                    <span class="radio-desc">传统 XOAUTH2 方式</span>
+                </span>
+            </label>
+            <p class="hint">选择后立即生效，只影响之后新导入的账号。</p>
+        </div>
+    </div>
+</form>
 
 <div class="card" style="max-width: 720px;">
     <h3>🔀 批量切换现有账号取件方式</h3>

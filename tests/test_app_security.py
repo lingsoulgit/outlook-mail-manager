@@ -31,6 +31,14 @@ def web_app(tmp_path, monkeypatch):
 
     import app
     import db
+    import update_manager
+
+    @contextmanager
+    def no_instance_lock():
+        yield
+
+    monkeypatch.setattr(update_manager, "application_instance_lock", no_instance_lock)
+    monkeypatch.setattr(update_manager, "recover_interrupted_update", lambda: False)
 
     importlib.reload(db)
     return importlib.reload(app)
@@ -127,6 +135,100 @@ def test_request_limit_security_headers_and_secure_cookie(web_app):
         assert page.headers["referrer-policy"] == "no-referrer"
         assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
         assert page.headers["strict-transport-security"].startswith("max-age=")
+
+
+def test_microsoft_device_oauth_saves_account_without_exposing_tokens(
+    web_app, monkeypatch
+):
+    client_id = "00000000-1111-2222-3333-444444444444"
+
+    def start_authorization(received_client_id, proxy=None):
+        assert received_client_id == client_id
+        return {
+            "device_code": "server-device-secret",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://microsoft.com/devicelogin",
+            "verification_uri_complete": "",
+            "expires_in": 900,
+            "interval": 5,
+        }
+
+    def poll_authorization(received_client_id, device_code, proxy=None):
+        assert received_client_id == client_id
+        assert device_code == "server-device-secret"
+        return {
+            "status": "authorized",
+            "access_token": "access-secret",
+            "refresh_token": "refresh-secret",
+        }
+
+    def account_email(access_token, proxy=None):
+        assert access_token == "access-secret"
+        return "person@outlook.com"
+
+    monkeypatch.setattr(
+        web_app.mail_fetcher,
+        "start_microsoft_device_authorization",
+        start_authorization,
+    )
+    monkeypatch.setattr(
+        web_app.mail_fetcher,
+        "poll_microsoft_device_authorization",
+        poll_authorization,
+    )
+    monkeypatch.setattr(
+        web_app.mail_fetcher,
+        "get_microsoft_account_email",
+        account_email,
+    )
+
+    with TestClient(web_app.app, base_url="https://testserver") as client:
+        assert _login(client).status_code == 303
+        csrf = _csrf(client)
+        rejected = client.post(
+            "/api/oauth/microsoft/device/start", json={"client_id": client_id}
+        )
+        assert rejected.status_code == 403
+
+        started = client.post(
+            "/api/oauth/microsoft/device/start",
+            json={"client_id": client_id},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert started.status_code == 200
+        assert "server-device-secret" not in started.text
+        flow_id = started.json()["flow_id"]
+        web_app._microsoft_oauth_flows[flow_id]["next_poll_at"] = 0
+
+        with TestClient(web_app.app, base_url="https://testserver") as other_client:
+            assert _login(other_client).status_code == 303
+            other_csrf = _csrf(other_client)
+            foreign_poll = other_client.post(
+                "/api/oauth/microsoft/device/poll",
+                json={"flow_id": flow_id},
+                headers={"X-CSRF-Token": other_csrf},
+            )
+            assert foreign_poll.status_code == 404
+
+        completed = client.post(
+            "/api/oauth/microsoft/device/poll",
+            json={"flow_id": flow_id},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert completed.status_code == 200
+        assert completed.json() == {
+            "status": "complete",
+            "email": "person@outlook.com",
+            "outcome": "added",
+        }
+        assert "access-secret" not in completed.text
+        assert "refresh-secret" not in completed.text
+        assert flow_id not in web_app._microsoft_oauth_flows
+        assert "person@outlook.com" in client.get("/").text
+        import_page = client.get("/import").text
+        assert client_id in import_page
+        assert 'id="microsoft-oauth-start"' in import_page
+        assert 'id="microsoft-oauth-panel"' in import_page
 
 
 def test_csrf_password_revocation_and_export_reauthentication(web_app):
@@ -228,6 +330,7 @@ def test_update_endpoints_use_global_proxy_and_require_csrf(web_app, monkeypatch
         saved = client.post(
             "/settings",
             data={
+                "global_proxy_mode": "manual",
                 "global_proxy": "socks5://127.0.0.1:1080",
                 "default_ms_fetch_mode": "graph",
                 "auto_check_hours": "0",
@@ -259,6 +362,77 @@ def test_update_endpoints_use_global_proxy_and_require_csrf(web_app, monkeypatch
         assert applied.status_code == 200
         assert applied.json()["to_version"] == "1.1.0"
         assert calls[-1] == ("apply", "1.1.0", "socks5://127.0.0.1:1080")
+
+        system_saved = client.post(
+            "/settings",
+            data={
+                "global_proxy_mode": "system",
+                "global_proxy": "socks5://127.0.0.1:1080",
+                "default_ms_fetch_mode": "graph",
+                "auto_check_hours": "0",
+                "csrf_token": csrf,
+            },
+        )
+        assert system_saved.status_code == 200
+        assert 'value="system"' in system_saved.text
+        assert client.get("/api/update/status?fresh=1").status_code == 200
+        assert calls[-1][:2] == ("check", web_app.SYSTEM_PROXY)
+
+        missing_manual_proxy = client.post(
+            "/settings",
+            data={
+                "global_proxy_mode": "manual",
+                "global_proxy": "",
+                "default_ms_fetch_mode": "graph",
+                "auto_check_hours": "0",
+                "csrf_token": csrf,
+            },
+        )
+        assert missing_manual_proxy.status_code == 400
+
+        direct_saved = client.post(
+            "/settings",
+            data={
+                "global_proxy_mode": "direct",
+                "global_proxy": "socks5://127.0.0.1:1080",
+                "default_ms_fetch_mode": "graph",
+                "auto_check_hours": "0",
+                "csrf_token": csrf,
+            },
+        )
+        assert direct_saved.status_code == 200
+        assert client.get("/api/update/status?fresh=1").status_code == 200
+        assert calls[-1][:2] == ("check", "")
+
+
+def test_default_ms_fetch_mode_can_be_saved_immediately(web_app):
+    with TestClient(web_app.app, base_url="https://testserver") as client:
+        assert _login(client).status_code == 303
+        csrf = _csrf(client)
+
+        missing_csrf = client.post(
+            "/api/settings/default-ms-fetch-mode", json={"fetch_mode": "imap"}
+        )
+        assert missing_csrf.status_code == 403
+
+        invalid = client.post(
+            "/api/settings/default-ms-fetch-mode",
+            json={"fetch_mode": "pop3"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert invalid.status_code == 400
+
+        saved = client.post(
+            "/api/settings/default-ms-fetch-mode",
+            json={"fetch_mode": "imap"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert saved.status_code == 200
+        assert saved.json() == {"ok": True, "fetch_mode": "imap"}
+        page = client.get("/settings").text
+        assert re.search(
+            r'name="default_ms_fetch_mode" value="imap"\s+checked', page
+        )
 
 
 def test_email_html_sanitizer_blocks_active_and_remote_content():
@@ -450,3 +624,132 @@ async def test_partial_fetch_saves_valid_mail_before_error_status(web_app, monke
     assert error_status[1] == "error"
     assert error_status[3] == 1
     assert calls[-1] == "released"
+
+
+@pytest.mark.asyncio
+async def test_health_check_queues_only_new_inbox_notification(web_app, monkeypatch):
+    account = {
+        "id": 3,
+        "email": "alerts@outlook.com",
+        "client_id": "client",
+        "refresh_token": "refresh",
+        "client_secret": "",
+        "provider": "microsoft",
+        "fetch_mode": "graph",
+        "proxy": "",
+        "enabled": 1,
+    }
+    queued = []
+
+    async def return_account(account_id):
+        return dict(account)
+
+    async def acquire(account_id):
+        return "owner"
+
+    async def release(account_id, owner):
+        return True
+
+    async def refresh(current):
+        return "access", False, ""
+
+    async def fetch(*args, **kwargs):
+        return {
+            "INBOX": [{
+                "uid": "inbox-1",
+                "from": "Sender <sender@example.com>",
+                "subject": "Latest message",
+                "body": "  Hello   from the newest message.  ",
+            }],
+            "JUNK": [{
+                "uid": "junk-1",
+                "from": "Spam <spam@example.com>",
+                "subject": "Do not notify",
+                "body_html": "<p>Junk body</p>",
+            }],
+        }
+
+    async def save(account_id, folder, emails):
+        return len(emails)
+
+    async def queue(*args):
+        queued.append(args)
+        return True
+
+    async def count(account_id):
+        return 2
+
+    async def status(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(web_app.db, "get_account", return_account)
+    monkeypatch.setattr(web_app.db, "acquire_account_lease", acquire)
+    monkeypatch.setattr(web_app.db, "release_account_lease", release)
+    monkeypatch.setattr(web_app.db, "save_emails", save)
+    monkeypatch.setattr(web_app.db, "create_mail_notification", queue)
+    monkeypatch.setattr(web_app.db, "get_email_count", count)
+    monkeypatch.setattr(web_app.db, "update_account_status", status)
+    monkeypatch.setattr(web_app, "_refresh_account", refresh)
+    monkeypatch.setattr(web_app.mail_fetcher, "check_account_with_access_token", fetch)
+
+    saved, rotated = await web_app._fetch_and_save(account, 1, notify_new=True)
+
+    assert saved == 2
+    assert rotated is False
+    assert len(queued) == 1
+    assert queued[0][1:5] == (
+        "INBOX",
+        "inbox-1",
+        "Sender <sender@example.com>",
+        "Latest message",
+    )
+    assert queued[0][5] == "Hello from the newest message."
+
+
+def test_notification_api_requires_csrf_and_returns_queue(web_app, monkeypatch):
+    notification = {
+        "id": 7,
+        "account_id": 3,
+        "account_email": "alerts@outlook.com",
+        "folder": "INBOX",
+        "sender": "sender@example.com",
+        "subject": "Latest message",
+        "preview": "Preview",
+        "created_at": "2026-08-28T00:00:00+00:00",
+        "delivered_at": None,
+        "read_at": None,
+    }
+
+    async def pending(limit):
+        return [notification]
+
+    async def recent(limit):
+        return [notification]
+
+    async def unread():
+        return 1
+
+    async def mark(notification_id):
+        return notification_id == 7
+
+    monkeypatch.setattr(web_app.db, "claim_pending_notifications", pending)
+    monkeypatch.setattr(web_app.db, "get_notifications", recent)
+    monkeypatch.setattr(web_app.db, "get_unread_notification_count", unread)
+    monkeypatch.setattr(web_app.db, "mark_notification_read", mark)
+
+    with TestClient(web_app.app, base_url="https://testserver") as client:
+        assert _login(client).status_code == 303
+        csrf = _csrf(client)
+        assert client.post("/api/notifications/poll").status_code == 403
+        response = client.post(
+            "/api/notifications/poll", headers={"X-CSRF-Token": csrf}
+        )
+        assert response.status_code == 200
+        assert response.json()["pending"][0]["subject"] == "Latest message"
+        assert response.json()["unread_count"] == 1
+        assert client.post(
+            "/api/notifications/7/read", headers={"X-CSRF-Token": csrf}
+        ).status_code == 200
+        assert client.post(
+            "/api/notifications/8/read", headers={"X-CSRF-Token": csrf}
+        ).status_code == 404

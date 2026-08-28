@@ -24,7 +24,7 @@ ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin123"
 TOKEN_LIFETIME_DAYS = 90
 TOKEN_WARNING_DAYS = 14
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 BUSY_TIMEOUT_MS = 5_000
 SESSION_DEFAULT_TTL = 7 * 24 * 60 * 60
 
@@ -470,6 +470,33 @@ async def _migration_6_account_leases(conn: aiosqlite.Connection) -> None:
     )
 
 
+async def _migration_7_mail_notifications(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            folder TEXT NOT NULL,
+            message_uid TEXT NOT NULL,
+            sender TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            preview TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            delivered_at TEXT,
+            read_at TEXT,
+            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+            UNIQUE (account_id, folder, message_uid)
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX idx_notifications_unread ON notifications(read_at, id DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX idx_notifications_pending ON notifications(delivered_at, id)"
+    )
+
+
 _MIGRATIONS = {
     1: _migration_1_normalize_legacy,
     2: _migration_2_rebuild_strict_tables,
@@ -477,6 +504,7 @@ _MIGRATIONS = {
     4: _migration_4_encrypt_credentials,
     5: _migration_5_normalize_account_emails,
     6: _migration_6_account_leases,
+    7: _migration_7_mail_notifications,
 }
 
 
@@ -1215,6 +1243,111 @@ async def save_emails(account_id: int, folder: str, emails: list[dict]) -> int:
         inserted = conn.total_changes - before
         await conn.commit()
         return inserted
+
+
+async def create_mail_notification(
+    account_id: int,
+    folder: str,
+    message_uid: str,
+    sender: str,
+    subject: str,
+    preview: str,
+) -> bool:
+    """Queue one durable notification for a newly stored mailbox message."""
+    uid = str(message_uid).strip()
+    if not uid:
+        raise ValueError("notification message UID must not be empty")
+    async with _connection() as conn:
+        cursor = await conn.execute(
+            """
+            INSERT OR IGNORE INTO notifications (
+                account_id, folder, message_uid, sender, subject, preview, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account_id,
+                str(folder)[:64],
+                uid[:2048],
+                str(sender or "")[:500],
+                str(subject or "")[:500],
+                str(preview or "")[:500],
+                _now_iso(),
+            ),
+        )
+        await conn.commit()
+        return cursor.rowcount == 1
+
+
+_NOTIFICATION_SELECT = """
+    SELECT n.id, n.account_id, a.email AS account_email, n.folder,
+           n.sender, n.subject, n.preview, n.created_at,
+           n.delivered_at, n.read_at
+    FROM notifications AS n
+    JOIN accounts AS a ON a.id = n.account_id
+"""
+
+
+async def get_notifications(limit: int = 20) -> list[dict]:
+    limit = max(1, min(int(limit), 100))
+    async with _connection() as conn:
+        cursor = await conn.execute(
+            _NOTIFICATION_SELECT + " ORDER BY n.id DESC LIMIT ?", (limit,)
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def claim_pending_notifications(limit: int = 20) -> list[dict]:
+    """Claim undelivered browser notifications once across concurrent tabs."""
+    limit = max(1, min(int(limit), 100))
+    async with _connection() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await conn.execute(
+                _NOTIFICATION_SELECT
+                + " WHERE n.delivered_at IS NULL ORDER BY n.id LIMIT ?",
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+            if rows:
+                ids = [row["id"] for row in rows]
+                placeholders = ",".join("?" for _ in ids)
+                await conn.execute(
+                    f"UPDATE notifications SET delivered_at = ? "
+                    f"WHERE delivered_at IS NULL AND id IN ({placeholders})",
+                    (_now_iso(), *ids),
+                )
+            await conn.commit()
+            return [dict(row) for row in rows]
+        except Exception:
+            await conn.rollback()
+            raise
+
+
+async def get_unread_notification_count() -> int:
+    async with _connection() as conn:
+        cursor = await conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE read_at IS NULL"
+        )
+        return int((await cursor.fetchone())[0])
+
+
+async def mark_notification_read(notification_id: int) -> bool:
+    async with _connection() as conn:
+        cursor = await conn.execute(
+            "UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE id = ?",
+            (_now_iso(), notification_id),
+        )
+        await conn.commit()
+        return cursor.rowcount == 1
+
+
+async def mark_all_notifications_read() -> int:
+    async with _connection() as conn:
+        cursor = await conn.execute(
+            "UPDATE notifications SET read_at = ? WHERE read_at IS NULL", (_now_iso(),)
+        )
+        await conn.commit()
+        return cursor.rowcount
 
 
 async def get_email_count(account_id: int) -> int:

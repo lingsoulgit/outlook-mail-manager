@@ -7,7 +7,7 @@
 - Microsoft Graph API 与 IMAP XOAUTH2 双模式取件。
 - Gmail IMAP OAuth2 取件。
 - 全局 HTTP/SOCKS 代理及账号专用代理；账号代理优先。
-- 批量导入、筛选、健康检测、令牌轮换和稳定 UID 去重。
+- 批量导入、筛选、健康检测、新邮件预警、令牌轮换和稳定 UID 去重。
 - 服务端会话、CSRF、登录限速、scrypt 密码哈希和凭据加密。
 - 邮件 HTML 清洗、沙箱 iframe、CSP 和远程内容阻断。
 - 登录后检查 GitHub Release；有新版本时可在页面一键更新。
@@ -50,7 +50,17 @@ python app.py
 
 ## 导入格式
 
-每行一个账号，使用四个连字符分隔：
+导入页支持“使用 Microsoft 登录”：填写一次 Entra 应用的 `client_id`，按页面提示完成设备码授权后，服务会通过 Microsoft Graph 识别邮箱，并自动加密保存 `refresh_token`。同一个 `client_id` 可用于添加多个账号。
+
+Microsoft 应用必须：
+
+- 开启“允许公共客户端流”；
+- 配置 Microsoft Graph 委托权限 `Mail.Read` 和 `User.Read`；
+- 允许请求 `offline_access`，以便微软签发 refresh token。
+
+设备码、access token 和 refresh token 不会返回浏览器；未完成的授权状态仅短暂保存在服务端内存中。
+
+也可以继续手工批量导入。每行一个账号，使用四个连字符分隔：
 
 ```text
 邮箱----第二字段----client_id----refresh_token
@@ -69,7 +79,13 @@ python app.py
 - IMAP 连接；
 - GitHub Release 检查、更新包下载和更新依赖安装。
 
-支持 `http://`、`socks4://`、`socks5://` 和 `socks5h://`。账号页面配置的专用代理优先于全局代理。页面明确保存空值表示直连，不会再次回退到 `OMM_PROXY`。
+代理设置提供三种模式：
+
+- **不使用代理**：所有请求明确直连；
+- **系统代理**：HTTP 请求跟随操作系统及 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`，IMAP 使用系统提供的静态 HTTP/SOCKS 代理；
+- **手动设置**：使用页面填写的代理地址。
+
+手动模式支持 `http://`、`socks4://`、`socks5://` 和 `socks5h://`。账号页面配置的专用代理优先于全局代理。旧版本尚未保存代理模式时，会继续兼容已保存的地址及 `OMM_PROXY`；一旦在页面选择并保存模式，便以页面选择为准。
 
 ## 凭据和备份
 
@@ -136,6 +152,10 @@ server {
 
 应用使用跨进程单实例锁和数据库账号租约。不要配置 Gunicorn/Uvicorn 多 worker；扩展为多实例前需要重新设计后台调度与重启编排。
 
+## 新邮件预警
+
+后台默认每 10 分钟检测一次启用账号，只读取收件箱与垃圾箱各自最新的 1 封邮件。首次写入的收件箱邮件会生成持久化通知，包含账号、发件人、主题和约 100 字正文摘要；垃圾箱只参与健康检测，不触发提醒。网页打开时会轮询通知队列，并在获得浏览器权限后显示桌面通知。完整邮件同步仍由通知中心的“立即完整取件”或首页取件按钮触发。
+
 ## 自动更新
 
 页面版本框在登录后请求 GitHub `releases/latest`。仅当 Release 的语义化版本高于本地 `VERSION` 时显示更新按钮。
@@ -161,8 +181,10 @@ server {
 | `OMM_SECRET_KEY` | 32 字节随机 Fernet key 的 URL-safe Base64 | 无 |
 | `OMM_PROXY` | 未在页面保存设置时使用的全局代理 | 空 |
 | `OMM_FETCH_CONCURRENCY` | 批量取件/健康检测时同时处理的账号数（1-20） | `5` |
+| `OMM_MS_CLIENT_ID` | 导入页预填的 Microsoft 应用程序（客户端）ID | 空 |
 | `OMM_MS_FETCH_MODE` | 新 Microsoft 账号默认模式：`graph`/`imap` | `graph` |
-| `OMM_AUTO_CHECK_HOURS` | 未在页面保存设置时的自动检测间隔 | `0` |
+| `OMM_AUTO_CHECK_MINUTES` | 未在页面保存设置时的自动检测间隔（分钟） | `10` |
+| `OMM_AUTO_CHECK_HOURS` | 旧版自动检测间隔；仅在未设置分钟变量时兼容读取 | 空 |
 | `OMM_MAX_REQUEST_BYTES` | POST/PUT/PATCH 请求体上限 | `2097152` |
 | `OMM_HOST` | 监听地址 | `127.0.0.1` |
 | `OMM_PORT` | 监听端口 | `8899` |

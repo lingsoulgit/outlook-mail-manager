@@ -92,10 +92,23 @@
     </form>
 
     <div class="table-wrap">
-    <table>
+    <table class="account-table">
+        <colgroup>
+            <col class="account-col-select">
+            <col class="account-col-id">
+            <col class="account-col-email">
+            <col class="account-col-provider">
+            <col class="account-col-fetch-mode">
+            <col class="account-col-status">
+            <col class="account-col-token">
+            <col class="account-col-mail-count">
+            <col class="account-col-last-check">
+            <col class="account-col-error">
+            <col class="account-col-actions">
+        </colgroup>
         <thead>
             <tr>
-                <th style="width: 34px;"><input type="checkbox" id="select-all" title="全选本页"></th>
+                <th><input type="checkbox" id="select-all" title="全选本页"></th>
                 <th>#</th>
                 <th>邮箱</th>
                 <th>供应商</th>
@@ -113,7 +126,7 @@
             <tr class="{{ 'row-error' if acc['status'] == 'error' else '' }} {{ 'row-disabled' if not acc['enabled'] else '' }}">
                 <td><input type="checkbox" class="account-check" value="{{ acc['id'] }}"></td>
                 <td class="num" style="color: var(--text-faint);">{{ acc['id'] }}</td>
-                <td><a href="/account/{{ acc['id'] }}">{{ acc['email'] }}</a></td>
+                <td class="account-email"><a href="/account/{{ acc['id'] }}">{{ acc['email'] }}</a></td>
                 <td>
                     {% if acc.get('provider', 'microsoft') == 'google' %}
                         <span class="badge badge-google">Gmail</span>
@@ -151,11 +164,11 @@
                 <td style="color: var(--text-dim); white-space: nowrap;">{{ acc['last_check'] | fmt_dt }}</td>
                 <td class="error-text" title="{{ acc['error'] or '' }}">
                     {% if acc['error_kind'] %}<span class="badge badge-error" style="margin-right: 4px;">{{ acc['error_kind'] }}</span>{% endif %}
-                    {{ (acc['error'] or '—')[:30] }}
+                    {{ acc['error'] or '—' }}
                 </td>
                 <td class="actions">
-                    <button class="btn btn-sm js-fetch-account" data-account-id="{{ acc['id'] }}">取件</button>
-                    <a href="/account/{{ acc['id'] }}/edit-token" class="btn btn-sm btn-primary" title="更新 refresh_token">令牌</a>
+                    <button class="btn btn-sm btn-primary js-fetch-account" data-account-id="{{ acc['id'] }}">取件</button>
+                    <a href="/account/{{ acc['id'] }}/edit-token" class="btn btn-sm" title="更新 refresh_token">令牌</a>
                     <form method="post" action="/account/{{ acc['id'] }}/toggle">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                         {% if not acc['enabled'] %}

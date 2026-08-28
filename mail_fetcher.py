@@ -17,6 +17,8 @@ from urllib.parse import unquote, urlparse
 
 import requests
 
+from proxy_config import is_system_proxy, system_proxy_url
+
 logger = logging.getLogger(__name__)
 
 IMAP_TIMEOUT = 30
@@ -26,6 +28,23 @@ IMAP_BODY_BATCH_SIZE = 20
 GRAPH_MAX_ATTEMPTS = 4
 GRAPH_BACKOFF_BASE = 0.5
 GRAPH_BACKOFF_CAP = 8.0
+
+MICROSOFT_DEVICE_CODE_URL = (
+    "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode"
+)
+MICROSOFT_DEVICE_SCOPE = (
+    "https://graph.microsoft.com/Mail.Read "
+    "https://graph.microsoft.com/User.Read offline_access"
+)
+MICROSOFT_PROFILE_URL = "https://graph.microsoft.com/v1.0/me"
+_MICROSOFT_VERIFICATION_HOSTS = frozenset(
+    {
+        "microsoft.com",
+        "www.microsoft.com",
+        "login.microsoft.com",
+        "login.microsoftonline.com",
+    }
+)
 
 _thread_state = threading.local()
 
@@ -91,6 +110,181 @@ class MailboxFetchError(RuntimeError):
         super().__init__("; ".join(issues))
 
 
+class MicrosoftOAuthError(RuntimeError):
+    """A safe OAuth classification that never includes token response bodies."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+def _microsoft_verification_uri(value: object) -> str:
+    uri = value.strip() if isinstance(value, str) else ""
+    try:
+        parsed = urlparse(uri)
+    except ValueError as exc:
+        raise MicrosoftOAuthError("invalid_response") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _MICROSOFT_VERIFICATION_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise MicrosoftOAuthError("invalid_response")
+    return uri
+
+
+def start_microsoft_device_authorization(
+    client_id: str, proxy: str | None = None
+) -> dict:
+    """Start a public-client device flow without exposing its device code."""
+    try:
+        response = _http_session().post(
+            MICROSOFT_DEVICE_CODE_URL,
+            data={"client_id": client_id, "scope": MICROSOFT_DEVICE_SCOPE},
+            timeout=HTTP_TIMEOUT,
+            proxies=_requests_proxies(_effective_proxy(proxy)),
+        )
+    except requests.RequestException as exc:
+        raise MicrosoftOAuthError("network_error") from exc
+
+    if response.status_code != 200:
+        try:
+            code = response.json().get("error", "")
+        except (ValueError, AttributeError):
+            code = ""
+        raise MicrosoftOAuthError(
+            code
+            if code in {"invalid_client", "invalid_request", "invalid_scope"}
+            else "service_error"
+        )
+
+    try:
+        result = response.json()
+        device_code = result["device_code"].strip()
+        user_code = result["user_code"].strip()
+        expires_in = int(result["expires_in"])
+        interval = int(result.get("interval", 5))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise MicrosoftOAuthError("invalid_response") from exc
+    if (
+        not isinstance(result, dict)
+        or not device_code
+        or len(device_code) > 4096
+        or not user_code
+        or len(user_code) > 64
+        or not 60 <= expires_in <= 3600
+    ):
+        raise MicrosoftOAuthError("invalid_response")
+
+    verification_uri = _microsoft_verification_uri(result.get("verification_uri"))
+    complete = result.get("verification_uri_complete", "")
+    verification_uri_complete = (
+        _microsoft_verification_uri(complete) if complete else ""
+    )
+    return {
+        "device_code": device_code,
+        "user_code": user_code,
+        "verification_uri": verification_uri,
+        "verification_uri_complete": verification_uri_complete,
+        "expires_in": expires_in,
+        "interval": max(1, min(interval, 60)),
+    }
+
+
+def poll_microsoft_device_authorization(
+    client_id: str, device_code: str, proxy: str | None = None
+) -> dict:
+    """Poll once for device authorization and return only classified results."""
+    try:
+        response = _http_session().post(
+            PROVIDERS["microsoft"]["token_url"],
+            data={
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "client_id": client_id,
+                "device_code": device_code,
+            },
+            timeout=HTTP_TIMEOUT,
+            proxies=_requests_proxies(_effective_proxy(proxy)),
+        )
+    except requests.RequestException as exc:
+        raise MicrosoftOAuthError("network_error") from exc
+
+    if response.status_code != 200:
+        try:
+            code = response.json().get("error", "")
+        except (ValueError, AttributeError):
+            code = ""
+        if code in {"authorization_pending", "slow_down"}:
+            return {"status": code}
+        if code in {
+            "authorization_declined",
+            "bad_verification_code",
+            "expired_token",
+            "invalid_client",
+            "invalid_grant",
+        }:
+            return {"status": "failed", "error": code}
+        raise MicrosoftOAuthError("service_error")
+
+    try:
+        result = response.json()
+        access_token = result["access_token"].strip()
+        refresh_token = result["refresh_token"].strip()
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise MicrosoftOAuthError("invalid_response") from exc
+    if (
+        not isinstance(result, dict)
+        or not access_token
+        or len(access_token) > 32_768
+        or not refresh_token
+        or len(refresh_token) > 8192
+    ):
+        raise MicrosoftOAuthError("invalid_response")
+    return {
+        "status": "authorized",
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+    }
+
+
+def get_microsoft_account_email(
+    access_token: str, proxy: str | None = None
+) -> str:
+    """Resolve the signed-in mailbox address from Microsoft Graph."""
+    try:
+        response = _http_session().get(
+            MICROSOFT_PROFILE_URL,
+            params={"$select": "mail,userPrincipalName,otherMails"},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=HTTP_TIMEOUT,
+            proxies=_requests_proxies(_effective_proxy(proxy)),
+        )
+    except requests.RequestException as exc:
+        raise MicrosoftOAuthError("network_error") from exc
+    if response.status_code != 200:
+        raise MicrosoftOAuthError(
+            "profile_forbidden" if response.status_code in {401, 403} else "service_error"
+        )
+
+    try:
+        result = response.json()
+    except ValueError as exc:
+        raise MicrosoftOAuthError("invalid_response") from exc
+    if not isinstance(result, dict):
+        raise MicrosoftOAuthError("invalid_response")
+    candidates = [result.get("mail"), result.get("userPrincipalName")]
+    other_mails = result.get("otherMails")
+    if isinstance(other_mails, list):
+        candidates.extend(other_mails)
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            email_addr = candidate.strip().lower()
+            if "@" in email_addr and len(email_addr) <= 320:
+                return email_addr
+    raise MicrosoftOAuthError("email_missing")
+
+
 def detect_provider(email_addr: str) -> str:
     """Detect the provider from the mailbox domain."""
     domain = email_addr.split("@")[-1].lower() if "@" in email_addr else ""
@@ -120,6 +314,8 @@ def _effective_proxy(proxy: str | None = None) -> str:
 
 
 def _requests_proxies(proxy: str):
+    if is_system_proxy(proxy):
+        return None
     if proxy:
         return {"http": proxy, "https": proxy}
     return {"http": None, "https": None, "all": None}
@@ -288,6 +484,8 @@ class _ProxyIMAP4SSL(imaplib.IMAP4_SSL):
 def _open_imap(host: str, port: int, proxy: str | None = None) -> imaplib.IMAP4_SSL:
     context = _verified_ssl_context()
     effective_proxy = _effective_proxy(proxy)
+    if is_system_proxy(effective_proxy):
+        effective_proxy = system_proxy_url(host)
     if effective_proxy:
         return _ProxyIMAP4SSL(
             host,
