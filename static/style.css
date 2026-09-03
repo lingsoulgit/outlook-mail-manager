@@ -391,8 +391,20 @@ code {
     margin-top: 2px;
 }
 
-a.stat-card { color: inherit; }
-a.stat-card:hover { border-color: rgba(248, 113, 113, 0.4); }
+.stat-filter {
+    width: 100%;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.stat-filter:hover { border-color: var(--border-strong); }
+.stat-filter.tone-ok:hover,
+.stat-filter.tone-ok[aria-pressed="true"] { border-color: rgba(52, 211, 153, 0.45); }
+.stat-filter.tone-err:hover,
+.stat-filter.tone-err[aria-pressed="true"] { border-color: rgba(248, 113, 113, 0.4); }
+.stat-filter[aria-pressed="true"] { border-color: rgba(129, 140, 248, 0.5); }
 
 /* ============ Buttons ============ */
 
@@ -470,7 +482,7 @@ table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .account-table .account-col-token { width: 120px; }
 .account-table .account-col-mail-count { width: 90px; }
 .account-table .account-col-last-check { width: 170px; }
-.account-table .account-col-actions { width: 236px; }
+.account-table .account-col-actions { width: 190px; }
 
 .account-table .account-email {
     overflow-wrap: anywhere;
@@ -526,6 +538,62 @@ td a:hover { color: var(--accent-hi); }
 .actions { display: flex; gap: 6px; white-space: nowrap; align-items: center; }
 .actions form { display: inline-flex; }
 .account-table .actions { flex-wrap: nowrap; }
+
+.account-more { display: inline-flex; }
+
+.account-more-trigger span {
+    color: var(--text-faint);
+    font-size: 10px;
+    transition: transform 0.15s ease;
+}
+
+.account-more-trigger[aria-expanded="true"] span { transform: rotate(180deg); }
+
+.account-more-menu {
+    position: fixed;
+    z-index: 1080;
+    min-width: 148px;
+    padding: 6px;
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    background: var(--surface-3);
+    box-shadow: var(--shadow-pop);
+}
+
+.account-more-menu[hidden] { display: none; }
+.account-more-menu form { display: block; width: 100%; }
+
+.account-more-item {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.35;
+    text-align: left;
+    cursor: pointer;
+}
+
+.account-more-item:hover,
+.account-more-item:focus-visible {
+    outline: none;
+    background: rgba(148, 163, 184, 0.12);
+}
+
+.account-more-item-success { color: var(--ok); }
+.account-more-item-warn { color: var(--warn); }
+.account-more-item-danger { color: var(--err); }
+
+.account-more-separator {
+    height: 1px;
+    margin: 5px 4px;
+    background: var(--border);
+}
 
 /* ============ Badges & pills ============ */
 

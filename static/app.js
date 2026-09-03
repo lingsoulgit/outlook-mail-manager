@@ -277,25 +277,6 @@
             location.href = accountUrl(item);
         };
 
-        const fetchFullMailbox = async (item, button) => {
-            button.disabled = true;
-            button.textContent = "取件中...";
-            try {
-                const data = await request(`/fetch/${item.account_id}`, {method: "POST"});
-                await request(`/api/notifications/${item.id}/read`, {method: "POST"});
-                if (data.partial) {
-                    toast(`取件部分完成：已保存 ${data.fetched} 封邮件；${data.error}`, "err");
-                } else {
-                    toast(`完整取件完成：新增 ${data.fetched} 封邮件`, "ok");
-                }
-                setTimeout(() => location.reload(), 900);
-            } catch (error) {
-                toast(`完整取件失败：${error.message}`, "err");
-                button.disabled = false;
-                button.textContent = "立即完整取件";
-            }
-        };
-
         const renderNotifications = (items) => {
             list.replaceChildren();
             if (!items.length) {
@@ -343,12 +324,7 @@
                 view.className = "btn btn-sm";
                 view.textContent = "查看邮件";
                 view.addEventListener("click", () => markReadAndOpen(item));
-                const fetchButton = document.createElement("button");
-                fetchButton.type = "button";
-                fetchButton.className = "btn btn-sm btn-primary";
-                fetchButton.textContent = "立即完整取件";
-                fetchButton.addEventListener("click", () => fetchFullMailbox(item, fetchButton));
-                actions.append(view, fetchButton);
+                actions.append(view);
                 card.appendChild(actions);
                 list.appendChild(card);
             }
@@ -585,6 +561,88 @@
         }
     }
 
+    function initAccountMoreMenus() {
+        const triggers = [...document.querySelectorAll(".js-account-more")];
+        if (!triggers.length) return;
+
+        const menuFor = (trigger) => document.getElementById(trigger.getAttribute("aria-controls"));
+        const closeMenu = (trigger) => {
+            const menu = menuFor(trigger);
+            if (menu) menu.hidden = true;
+            trigger.setAttribute("aria-expanded", "false");
+        };
+        const closeAll = (except = null) => {
+            triggers.forEach((trigger) => {
+                if (trigger !== except) closeMenu(trigger);
+            });
+        };
+        const positionMenu = (trigger, menu) => {
+            const triggerRect = trigger.getBoundingClientRect();
+            const menuWidth = menu.offsetWidth;
+            const menuHeight = menu.offsetHeight;
+            const edge = 8;
+            let left = triggerRect.right - menuWidth;
+            let top = triggerRect.bottom + 6;
+            if (top + menuHeight > window.innerHeight - edge) {
+                top = triggerRect.top - menuHeight - 6;
+            }
+            left = Math.min(Math.max(edge, left), window.innerWidth - menuWidth - edge);
+            top = Math.max(edge, top);
+            menu.style.left = `${left}px`;
+            menu.style.top = `${top}px`;
+        };
+
+        triggers.forEach((trigger) => {
+            trigger.addEventListener("click", () => {
+                const menu = menuFor(trigger);
+                if (!menu) return;
+                const shouldOpen = menu.hidden;
+                closeAll(trigger);
+                if (!shouldOpen) {
+                    closeMenu(trigger);
+                    return;
+                }
+                menu.hidden = false;
+                trigger.setAttribute("aria-expanded", "true");
+                positionMenu(trigger, menu);
+                menu.querySelector('[role="menuitem"]')?.focus();
+            });
+        });
+
+        document.addEventListener("click", (event) => {
+            if (!event.target.closest(".account-more")) closeAll();
+        });
+        document.addEventListener("keydown", (event) => {
+            if (event.key !== "Escape") return;
+            const active = triggers.find((trigger) => trigger.getAttribute("aria-expanded") === "true");
+            if (!active) return;
+            closeMenu(active);
+            active.focus();
+        });
+        window.addEventListener("resize", () => closeAll());
+        document.addEventListener("scroll", () => closeAll(), true);
+    }
+
+    function initStatFilters() {
+        const form = document.querySelector(".filter-bar");
+        const statusSelect = form?.querySelector('select[name="status"]');
+        const buttons = [...document.querySelectorAll(".js-stat-filter")];
+        if (!form || !statusSelect || !buttons.length) return;
+
+        buttons.forEach((button) => {
+            button.addEventListener("click", () => {
+                const nextStatus = button.dataset.status || "";
+                if (statusSelect.value === nextStatus) return;
+                statusSelect.value = nextStatus;
+                buttons.forEach((item) => {
+                    item.setAttribute("aria-pressed", String((item.dataset.status || "") === nextStatus));
+                });
+                if (typeof form.requestSubmit === "function") form.requestSubmit();
+                else form.submit();
+            });
+        });
+    }
+
     document.addEventListener("DOMContentLoaded", () => {
         const proxyModeInputs = document.querySelectorAll('input[name="global_proxy_mode"]');
         const manualProxyFields = document.getElementById("manual-proxy-fields");
@@ -598,6 +656,8 @@
         proxyModeInputs.forEach((input) => input.addEventListener("change", syncProxyMode));
         syncProxyMode();
         initDefaultMicrosoftFetchMode();
+        initStatFilters();
+        initAccountMoreMenus();
         document.querySelectorAll(".js-fetch-account").forEach((button) =>
             button.addEventListener("click", () => fetchAccount(button)));
         document.getElementById("fetch-all-btn")?.addEventListener("click", (event) => fetchAll(event.currentTarget));

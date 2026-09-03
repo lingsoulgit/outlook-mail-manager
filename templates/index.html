@@ -20,7 +20,11 @@
 {% endif %}
 
 <div class="stats-grid">
-    <div class="stat-card">
+    <button type="button"
+            class="stat-card stat-filter js-stat-filter"
+            data-status=""
+            aria-pressed="{{ 'true' if not status else 'false' }}"
+            title="清除账号状态筛选">
         <div class="stat-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
         </div>
@@ -28,8 +32,12 @@
             <span class="stat-value"><strong>{{ stats.total }}</strong></span>
             <span class="stat-label">总账号</span>
         </div>
-    </div>
-    <div class="stat-card tone-ok">
+    </button>
+    <button type="button"
+            class="stat-card stat-filter tone-ok js-stat-filter"
+            data-status="active"
+            aria-pressed="{{ 'true' if status == 'active' else 'false' }}"
+            title="筛选活跃账号">
         <div class="stat-icon ok">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
         </div>
@@ -37,8 +45,12 @@
             <span class="stat-value"><strong>{{ stats.ok }}</strong></span>
             <span class="stat-label">活跃账号</span>
         </div>
-    </div>
-    <a href="/?status=error" class="stat-card tone-err" title="点击筛选异常账号">
+    </button>
+    <button type="button"
+            class="stat-card stat-filter tone-err js-stat-filter"
+            data-status="error"
+            aria-pressed="{{ 'true' if status == 'error' else 'false' }}"
+            title="筛选异常账号">
         <div class="stat-icon err">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
         </div>
@@ -46,7 +58,7 @@
             <span class="stat-value"><strong>{{ stats.error }}</strong></span>
             <span class="stat-label">异常账号</span>
         </div>
-    </a>
+    </button>
     <div class="stat-card">
         <div class="stat-icon info">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z" opacity="0"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/><rect width="18" height="14" x="3" y="5" rx="2"/></svg>
@@ -167,24 +179,40 @@
                     {{ acc['error'] or '—' }}
                 </td>
                 <td class="actions">
-                    <button class="btn btn-sm btn-primary js-fetch-account" data-account-id="{{ acc['id'] }}">取件</button>
-                    <a href="/account/{{ acc['id'] }}/edit-token" class="btn btn-sm" title="更新 refresh_token">令牌</a>
-                    <form method="post" action="/account/{{ acc['id'] }}/toggle">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                        {% if not acc['enabled'] %}
-                            <input type="hidden" name="action" value="enable">
-                            <button class="btn btn-sm btn-success">启用</button>
-                        {% else %}
-                            <input type="hidden" name="action" value="disable">
-                            <button class="btn btn-sm btn-warn">禁用</button>
-                        {% endif %}
-                    </form>
-                    <form method="post" action="/account/{{ acc['id'] }}/toggle"
-                          data-confirm="确定删除该账号及所有邮件？">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                        <input type="hidden" name="action" value="delete">
-                        <button class="btn btn-sm btn-danger">删除</button>
-                    </form>
+                    <button type="button" class="btn btn-sm btn-primary js-fetch-account" data-account-id="{{ acc['id'] }}">取件</button>
+                    <a href="/account/{{ acc['id'] }}" class="btn btn-sm">查看</a>
+                    <div class="account-more">
+                        <button type="button"
+                                class="btn btn-sm account-more-trigger js-account-more"
+                                aria-haspopup="menu"
+                                aria-expanded="false"
+                                aria-controls="account-more-menu-{{ acc['id'] }}"
+                                aria-label="更多操作：{{ acc['email'] }}">
+                            更多 <span aria-hidden="true">▾</span>
+                        </button>
+                        <div id="account-more-menu-{{ acc['id'] }}" class="account-more-menu" role="menu" hidden>
+                            <a href="/account/{{ acc['id'] }}/edit-token"
+                               class="account-more-item"
+                               role="menuitem">更新令牌</a>
+                            <form method="post" action="/account/{{ acc['id'] }}/toggle">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                {% if not acc['enabled'] %}
+                                    <input type="hidden" name="action" value="enable">
+                                    <button type="submit" class="account-more-item account-more-item-success" role="menuitem">启用账号</button>
+                                {% else %}
+                                    <input type="hidden" name="action" value="disable">
+                                    <button type="submit" class="account-more-item account-more-item-warn" role="menuitem">禁用账号</button>
+                                {% endif %}
+                            </form>
+                            <div class="account-more-separator" role="separator"></div>
+                            <form method="post" action="/account/{{ acc['id'] }}/toggle"
+                                  data-confirm="确定删除该账号及所有邮件？">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <input type="hidden" name="action" value="delete">
+                                <button type="submit" class="account-more-item account-more-item-danger" role="menuitem">删除账号</button>
+                            </form>
+                        </div>
+                    </div>
                 </td>
             </tr>
         {% else %}
