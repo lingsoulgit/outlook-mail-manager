@@ -990,7 +990,7 @@ def _fetch_via_graph_with_access_token(
             )
         results[label] = folder_emails
 
-    logger.info("Fetched mailbox via Microsoft Graph")
+    # logger.info("Fetched mailbox via Microsoft Graph")
     return results
 
 

@@ -64,7 +64,9 @@
         let savedValue = inputs.find((input) => input.checked)?.value || "graph";
         inputs.forEach((input) => input.addEventListener("change", async () => {
             if (!input.checked || input.value === savedValue) return;
-            inputs.forEach((item) => { item.disabled = true; });
+            inputs.forEach((item) => {
+                item.disabled = true;
+            });
             try {
                 await request("/api/settings/default-ms-fetch-mode", {
                     method: "POST",
@@ -78,7 +80,9 @@
                 if (previous) previous.checked = true;
                 toast(`保存默认取件方式失败：${error.message}`, "err");
             } finally {
-                inputs.forEach((item) => { item.disabled = false; });
+                inputs.forEach((item) => {
+                    item.disabled = false;
+                });
             }
         }));
     }
@@ -133,7 +137,9 @@
                     status.textContent = `${data.email} 已${data.outcome === "added" ? "添加" : "更新"}，即将返回账号总览...`;
                     startButton.textContent = "授权完成";
                     toast(`Microsoft 账号 ${data.email} 已保存`, "ok");
-                    setTimeout(() => { location.href = "/"; }, 1200);
+                    setTimeout(() => {
+                        location.href = "/";
+                    }, 1200);
                 } catch (error) {
                     if (generation !== activeFlow) return;
                     status.textContent = `授权失败：${error.message}`;
@@ -218,8 +224,8 @@
         try {
             const data = await request(healthCheck ? "/check-all" : "/fetch-all", {method: "POST"});
             toast(healthCheck
-                ? `健康检测完成\n可用: ${data.success} 个，异常: ${data.failed} 个`
-                : `批量取件完成\n成功: ${data.success} 个，失败: ${data.failed} 个，新增: ${data.total_emails} 封`,
+                    ? `健康检测完成\n可用: ${data.success} 个，异常: ${data.failed} 个`
+                    : `批量取件完成\n成功: ${data.success} 个，失败: ${data.failed} 个，新增: ${data.total_emails} 封`,
                 data.failed > 0 ? "err" : "ok");
             setTimeout(() => location.reload(), 1200);
         } catch (error) {
@@ -519,26 +525,28 @@
         if (!widget || updateBusy) return;
         const status = widget.querySelector(".version-status");
         const button = widget.querySelector(".version-update");
-        updateBusy = true;
-        try {
-            const data = await request(`/api/update/status${fresh ? "?fresh=1" : ""}`);
-            widget.classList.remove("failed");
-            if (!data.update_available) {
-                widget.classList.add("is-current");
-                status.textContent = "已是最新";
-                return;
-            }
-            widget.classList.add("has-update");
-            status.textContent = `可更新至 v${data.latest_version}`;
-            button.hidden = false;
-            button.dataset.version = data.latest_version;
-        } catch (error) {
-            widget.classList.add("failed");
-            status.textContent = "检查失败 · 点击重试";
-            widget.title = error.message;
-        } finally {
-            updateBusy = false;
-        }
+        widget.classList.add("is-current");
+        status.textContent = "已是最新";
+        // updateBusy = true;
+        // try {
+        //     const data = await request(`/api/update/status${fresh ? "?fresh=1" : ""}`);
+        //     widget.classList.remove("failed");
+        //     if (!data.update_available) {
+        //         widget.classList.add("is-current");
+        //         status.textContent = "已是最新";
+        //         return;
+        //     }
+        //     widget.classList.add("has-update");
+        //     status.textContent = `可更新至 v${data.latest_version}`;
+        //     button.hidden = false;
+        //     button.dataset.version = data.latest_version;
+        // } catch (error) {
+        //     widget.classList.add("failed");
+        //     status.textContent = "检查失败 · 点击重试";
+        //     widget.title = error.message;
+        // } finally {
+        //     updateBusy = false;
+        // }
     }
 
     async function applyUpdate(button) {
@@ -671,7 +679,9 @@
                 if (!confirm(form.dataset.confirm)) event.preventDefault();
             }));
         document.getElementById("select-all")?.addEventListener("change", (event) => {
-            document.querySelectorAll(".account-check").forEach((box) => { box.checked = event.currentTarget.checked; });
+            document.querySelectorAll(".account-check").forEach((box) => {
+                box.checked = event.currentTarget.checked;
+            });
         });
         document.getElementById("export-selected")?.addEventListener("click", () => {
             const ids = [...document.querySelectorAll(".account-check:checked")].map((box) => box.value);
